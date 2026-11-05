@@ -1,13 +1,11 @@
 // Vault, package 0: login test. Shows whether Google login works in an iOS home-screen PWA
 // and counts the .md files in Drive folder "Life OS". Read-only (drive.readonly).
+import './style.css';
 
 const CLIENT_ID = '998109822582-0d8r91l6vnasl8uo56bk3gicj29f19gu.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
-const REDIRECT_URI = location.origin + '/vault/';
 const KEY = 'vault.token';
-const MODE_KEY = 'vault.mode';
 
-type Mode = 'popup' | 'redirect';
 interface Token { access_token: string; expires_at: number }
 
 declare const google: any;
@@ -19,25 +17,11 @@ function log(msg: string) {
   render();
 }
 
-let mode: Mode = (localStorage.getItem(MODE_KEY) as Mode) || 'popup';
 let token: Token | null = null;
 let result = '';
 let busy = false;
 
 try { token = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { token = null; }
-
-// Redirect variant: Google returns #access_token=... on the same page.
-function consumeHash() {
-  if (!location.hash.includes('access_token')) return;
-  const p = new URLSearchParams(location.hash.slice(1));
-  const at = p.get('access_token');
-  const exp = Number(p.get('expires_in') || '3600');
-  if (at) {
-    saveToken({ access_token: at, expires_at: Date.now() + exp * 1000 - 60_000 });
-    log(`redirect-login ok, token geldig ${exp}s`);
-  }
-  history.replaceState(null, '', location.pathname);
-}
 
 function saveToken(t: Token) {
   token = t;
@@ -64,30 +48,13 @@ function signInPopup(prompt: '' | 'consent' | 'select_account'): Promise<void> {
   });
 }
 
-function signInRedirect(silent: boolean) {
-  const p = new URLSearchParams({
-    client_id: CLIENT_ID,
-    redirect_uri: REDIRECT_URI,
-    response_type: 'token',
-    scope: SCOPE,
-    include_granted_scopes: 'true',
-  });
-  if (silent) p.set('prompt', 'none');
-  location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + p;
-}
-
+// Always called from a tap: a popup without a user gesture is blocked by Safari.
 async function login(silent = false) {
   busy = true; render();
   try {
-    if (mode === 'popup') {
-      log(`popup-login (prompt='${silent ? '' : 'consent'}')`);
-      await signInPopup(silent ? '' : 'consent');
-      log('popup-login ok');
-    } else {
-      log('redirect-login gestart');
-      signInRedirect(silent);
-      return;
-    }
+    log(`popup-login (prompt='${silent ? '' : 'consent'}')`);
+    await signInPopup(silent ? '' : 'consent');
+    log('popup-login ok');
     await count();
   } catch (e: any) {
     log('FOUT: ' + e.message);
@@ -134,8 +101,6 @@ async function count() {
   } finally { busy = false; render(); }
 }
 
-function setMode(m: Mode) { mode = m; localStorage.setItem(MODE_KEY, m); log('modus: ' + m); }
-
 function logout() {
   if (token && typeof google !== 'undefined') google.accounts.oauth2.revoke(token.access_token, () => {});
   token = null; result = '';
@@ -146,32 +111,44 @@ function logout() {
 function render() {
   const standalone = (navigator as any).standalone === true || matchMedia('(display-mode: standalone)').matches;
   const left = token ? Math.round((token.expires_at - Date.now()) / 60000) : 0;
+  // Static markup only; everything dynamic goes in via textContent (log lines can contain server text).
+  const buttons = valid()
+    ? `<button id="count" ${busy ? 'disabled' : ''}>Tel opnieuw</button><button class="secondary" id="logout">Uitloggen</button>`
+    : token
+      ? `<button id="renew" ${busy ? 'disabled' : ''}>Doorgaan</button><button class="secondary" id="login" ${busy ? 'disabled' : ''}>Opnieuw inloggen</button>`
+      : `<button id="login" ${busy ? 'disabled' : ''}>Inloggen met Google</button>`;
   app.innerHTML = `
-    <p class="muted">Modus: ${standalone ? 'beginscherm (standalone)' : 'browser'} · login: ${mode}</p>
-    ${result ? `<div class="big">${result}</div><p>md-bestanden in Life OS</p>` : ''}
-    <p>${valid() ? `Ingelogd, token nog ±${left} min geldig.` : token ? 'Token verlopen.' : 'Niet ingelogd.'}</p>
-    ${valid()
-      ? `<button id="count" ${busy ? 'disabled' : ''}>Tel opnieuw</button><button class="secondary" id="logout">Uitloggen</button>`
-      : `<button id="login" ${busy ? 'disabled' : ''}>Inloggen met Google</button>`}
-    <p class="muted">Testknoppen</p>
-    <button class="secondary" id="m-popup">Popup</button><button class="secondary" id="m-redirect">Redirect</button>
-    <button class="secondary" id="silent">Stil vernieuwen</button>
-    <pre>${logLines.join('\n') || '(nog geen log)'}</pre>`;
+    <p class="muted" id="mode"></p>
+    <div id="result"></div>
+    <p id="status"></p>
+    ${buttons}
+    <pre id="log"></pre>`;
+  document.getElementById('mode')!.textContent = `Modus: ${standalone ? 'beginscherm (standalone)' : 'browser'}`;
+  const resultEl = document.getElementById('result')!;
+  if (result) {
+    const big = document.createElement('div');
+    big.className = 'big';
+    big.textContent = result;
+    const label = document.createElement('p');
+    label.textContent = 'md-bestanden in Life OS';
+    resultEl.append(big, label);
+  }
+  document.getElementById('status')!.textContent = valid()
+    ? `Ingelogd, token nog ±${left} min geldig.`
+    : token ? 'Token verlopen. Tik op Doorgaan om te vernieuwen.' : 'Niet ingelogd.';
+  document.getElementById('log')!.textContent = logLines.join('\n') || '(nog geen log)';
   const on = (id: string, fn: () => void) => document.getElementById(id)?.addEventListener('click', fn);
   on('login', () => login(false));
+  on('renew', () => login(true));
   on('count', count);
   on('logout', logout);
-  on('m-popup', () => setMode('popup'));
-  on('m-redirect', () => setMode('redirect'));
-  on('silent', () => login(true));
 }
 
 async function start() {
-  consumeHash();
   render();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/vault/sw.js').catch((e) => log('sw: ' + e.message));
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch((e) => log('sw: ' + e.message));
   if (valid()) { log('bestaand token gebruikt, geen login nodig'); await count(); }
-  else if (token) { log('token verlopen bij opstart, probeer stil vernieuwen'); await login(true); }
+  else if (token) log('token verlopen bij opstart; wacht op tik op Doorgaan');
 }
 
 // Load Google Identity Services, then start.

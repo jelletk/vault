@@ -1,3 +1,3 @@
 import { defineConfig } from 'vite';
 
-export default defineConfig({ base: '/vault/' });
+export default defineConfig({ base: '/' });
