@@ -1,0 +1,13 @@
+{
+  "name": "Vault",
+  "short_name": "Vault",
+  "start_url": "/vault/",
+  "scope": "/vault/",
+  "display": "standalone",
+  "background_color": "#f5f1e8",
+  "theme_color": "#f5f1e8",
+  "icons": [
+    { "src": "/vault/icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "/vault/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
