@@ -95,7 +95,7 @@ async function login(silent = false) {
 }
 
 async function api(path: string) {
-  const r = await fetch('https://www.googleapis.com/drive/v3/' + path, { headers: { Authorization: 'Bearer ' + token!.access_token } });
+  const r = await fetch('https://www.googleapis.com/drive/v3/' + path, { headers: { Authorization: 'Bearer ' + token!.access_token }, signal: AbortSignal.timeout(20000) });
   if (!r.ok) throw new Error(`Drive ${r.status}: ${(await r.text()).slice(0, 200)}`);
   return r.json();
 }
@@ -108,6 +108,8 @@ async function count() {
     const rootId = root.files[0].id;
     let md = 0, folders = 0, others = 0;
     let queue = [rootId];
+    log('map Life OS gevonden, tellen gestart');
+    let calls = 0;
     while (queue.length) {
       const batch = queue.splice(0, 8); // parents in one query keeps requests low
       const q = batch.map((id) => `'${id}' in parents`).join(' or ');
@@ -120,6 +122,8 @@ async function count() {
           else others++;
         }
         pageToken = d.nextPageToken || '';
+        calls++;
+        if (calls % 5 === 0) log(`bezig: ${md} md, ${folders} mappen, wachtrij ${queue.length}`);
       } while (pageToken);
     }
     result = String(md);
