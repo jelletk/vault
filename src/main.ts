@@ -1,6 +1,12 @@
-// Vault, package 0: login test. Shows whether Google login works in an iOS home-screen PWA
-// and counts the .md files in Drive folder "Life OS". Read-only (drive.readonly).
+// Vault, package 2: sync test page. Logs in with Google (token client), syncs the Drive folder "Life OS"
+// into IndexedDB and shows what is stored. Read-only (drive.readonly). Real screens come in package 3.
 import './style.css';
+import type { IDBPDatabase } from 'idb';
+import { createDrive } from './sync/drive';
+import { openVault, requestPersistence, wipeAll } from './sync/db';
+import { summarize } from './sync/paths';
+import { runSync } from './sync/sync';
+import type { SyncStats, TreeNode } from './sync/types';
 
 const CLIENT_ID = '998109822582-0d8r91l6vnasl8uo56bk3gicj29f19gu.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
@@ -49,74 +55,94 @@ function signInPopup(prompt: '' | 'consent' | 'select_account'): Promise<void> {
 }
 
 // Always called from a tap: a popup without a user gesture is blocked by Safari.
-async function login(silent = false) {
+async function login() {
   busy = true; render();
   try {
-    log(`popup-login (prompt='${silent ? '' : 'consent'}')`);
-    await signInPopup(silent ? '' : 'consent');
+    log("popup-login (prompt='consent')");
+    await signInPopup('consent');
     log('popup-login ok');
-    await count();
   } catch (e: any) {
     log('FOUT: ' + e.message);
-  } finally { busy = false; render(); }
+    busy = false; render();
+    return;
+  }
+  busy = false;
+  await update();
 }
 
-async function api(path: string) {
-  const r = await fetch('https://www.googleapis.com/drive/v3/' + path, { headers: { Authorization: 'Bearer ' + token!.access_token }, signal: AbortSignal.timeout(20000) });
-  if (!r.ok) throw new Error(`Drive ${r.status}: ${(await r.text()).slice(0, 200)}`);
-  return r.json();
+// --- Sync (package 2): the test page now syncs Life OS into IndexedDB instead of only counting. ---
+let db: IDBPDatabase | null = null;
+let local: { md: number; folders: number; otherFiles: number; lastSyncAt: number; stats?: SyncStats } | null = null;
+
+async function openLocal() {
+  db = await openVault();
+  await refreshLocal();
 }
 
-async function count() {
+async function refreshLocal() {
+  if (!db) return;
+  const nodes = (await db.getAll('tree')) as TreeNode[];
+  const lastSyncAt = (await db.get('meta', 'lastSyncAt')) as number | undefined;
+  if (!nodes.length || !lastSyncAt) { local = null; result = ''; return; }
+  const rootId = (await db.get('meta', 'rootId')) as string;
+  const sum = summarize(new Map(nodes.map((n) => [n.id, n])), rootId);
+  local = { ...sum, lastSyncAt, stats: (await db.get('meta', 'lastSyncStats')) as SyncStats | undefined };
+  result = String(sum.md);
+}
+
+let lastProgressRender = 0;
+function progress(msg: string) {
+  logLines.push(new Date().toLocaleTimeString('nl-NL') + '  ' + msg);
+  const now = Date.now();
+  if (now - lastProgressRender > 250) { lastProgressRender = now; render(); }
+}
+
+async function update() {
+  if (busy) return;
   busy = true; render();
   try {
-    const root = await api(`files?q=${encodeURIComponent("name='Life OS' and 'root' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false")}&fields=files(id,name)`);
-    if (!root.files.length) { result = 'Map "Life OS" niet gevonden in de root van Mijn Drive'; log(result); return; }
-    const rootId = root.files[0].id;
-    let md = 0, folders = 0, others = 0;
-    let queue = [rootId];
-    log('map Life OS gevonden, tellen gestart');
-    let calls = 0;
-    while (queue.length) {
-      const batch = queue.splice(0, 8); // parents in one query keeps requests low
-      const q = batch.map((id) => `'${id}' in parents`).join(' or ');
-      let pageToken = '';
-      do {
-        const d = await api(`files?q=${encodeURIComponent(`(${q}) and trashed=false`)}&fields=nextPageToken,files(id,name,mimeType)&pageSize=1000&spaces=drive${pageToken ? '&pageToken=' + pageToken : ''}`);
-        for (const f of d.files) {
-          if (f.mimeType === 'application/vnd.google-apps.folder') { folders++; queue.push(f.id); }
-          else if (f.name.toLowerCase().endsWith('.md')) md++;
-          else others++;
-        }
-        pageToken = d.nextPageToken || '';
-        calls++;
-        if (calls % 5 === 0) log(`bezig: ${md} md, ${folders} mappen, wachtrij ${queue.length}`);
-      } while (pageToken);
-    }
-    result = String(md);
-    log(`telling klaar: ${md} md-bestanden, ${folders} mappen, ${others} andere bestanden`);
+    if (!valid()) { log("token verlopen: popup-login (prompt='')"); await signInPopup(''); log('popup-login ok'); }
+    if (!db) await openLocal();
+    const drive = createDrive(() => (valid() ? token!.access_token : null));
+    const stats = await runSync(drive, db!, progress);
+    log(`sync klaar (${stats.mode}) in ${(stats.durationMs / 1000).toFixed(1)} s: ${stats.md} md, ${stats.folders} mappen, ${stats.otherFiles} andere; `
+      + `${stats.downloaded} gedownload, ${stats.skippedUnchanged} ongewijzigd, +${stats.added} ~${stats.modified} -${stats.removed}, ${stats.apiCalls} API-calls`
+      + (stats.failedDownloads ? `, ${stats.failedDownloads} MISLUKT` : ''));
+    await refreshLocal();
+    await logStorage();
   } catch (e: any) {
-    if (String(e.message).includes('401')) { token = null; localStorage.removeItem(KEY); log('token afgewezen (401)'); }
-    else log('FOUT: ' + e.message);
+    if (e?.name === 'AuthError') {
+      token = null; localStorage.removeItem(KEY);
+      log('token verlopen of afgewezen; opgeslagen notities blijven leesbaar. Tik op Bijwerken.');
+    } else log('FOUT: ' + (e?.message ?? e));
   } finally { busy = false; render(); }
 }
 
-function logout() {
+async function logStorage() {
+  try {
+    const est = await navigator.storage?.estimate?.();
+    if (est) log(`opslag: ${((est.usage ?? 0) / 1048576).toFixed(1)} MB in gebruik van ${((est.quota ?? 0) / 1048576).toFixed(0)} MB`);
+  } catch { /* not available */ }
+}
+
+async function logout() {
   if (token && typeof google !== 'undefined') google.accounts.oauth2.revoke(token.access_token, () => {});
-  token = null; result = '';
+  token = null; result = ''; local = null;
   localStorage.removeItem(KEY);
-  log('uitgelogd');
+  await wipeAll(db);
+  db = null;
+  log('uitgelogd; lokale notities en caches gewist');
+  render();
 }
 
 function render() {
   const standalone = (navigator as any).standalone === true || matchMedia('(display-mode: standalone)').matches;
   const left = token ? Math.round((token.expires_at - Date.now()) / 60000) : 0;
   // Static markup only; everything dynamic goes in via textContent (log lines can contain server text).
-  const buttons = valid()
-    ? `<button id="count" ${busy ? 'disabled' : ''}>Tel opnieuw</button><button class="secondary" id="logout">Uitloggen</button>`
-    : token
-      ? `<button id="renew" ${busy ? 'disabled' : ''}>Doorgaan</button><button class="secondary" id="login" ${busy ? 'disabled' : ''}>Opnieuw inloggen</button>`
-      : `<button id="login" ${busy ? 'disabled' : ''}>Inloggen met Google</button>`;
+  const dis = busy ? 'disabled' : '';
+  const buttons = local || valid()
+    ? `<button id="update" ${dis}>Bijwerken</button>` + (!valid() && token ? `<button class="secondary" id="login" ${dis}>Opnieuw inloggen</button>` : '') + `<button class="secondary" id="logout" ${dis}>Uitloggen</button>`
+    : `<button id="login" ${dis}>Inloggen met Google</button>`;
   app.innerHTML = `
     <p class="muted" id="mode"></p>
     <div id="result"></div>
@@ -130,25 +156,34 @@ function render() {
     big.className = 'big';
     big.textContent = result;
     const label = document.createElement('p');
-    label.textContent = 'md-bestanden in Life OS';
+    label.textContent = 'md-bestanden lokaal opgeslagen' + (local ? ` · ${local.folders} mappen · ${local.otherFiles} andere bestanden (alleen naam)` : '');
     resultEl.append(big, label);
   }
   document.getElementById('status')!.textContent = valid()
     ? `Ingelogd, token nog ±${left} min geldig.`
-    : token ? 'Token verlopen. Tik op Doorgaan om te vernieuwen.' : 'Niet ingelogd.';
+    : token ? 'Token verlopen. Lezen kan nog; tik op Bijwerken om te vernieuwen.' : local ? 'Geen geldig token. Lezen kan nog; tik op Bijwerken.' : 'Niet ingelogd.';
+  if (local) document.getElementById('status')!.textContent += ` Laatst bijgewerkt ${new Date(local.lastSyncAt).toLocaleString('nl-NL')}.`;
   document.getElementById('log')!.textContent = logLines.join('\n') || '(nog geen log)';
   const on = (id: string, fn: () => void) => document.getElementById(id)?.addEventListener('click', fn);
-  on('login', () => login(false));
-  on('renew', () => login(true));
-  on('count', count);
+  on('login', login);
+  on('update', update);
   on('logout', logout);
 }
 
 async function start() {
   render();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch((e) => log('sw: ' + e.message));
-  if (valid()) { log('bestaand token gebruikt, geen login nodig'); await count(); }
-  else if (token) log('token verlopen bij opstart; wacht op tik op Doorgaan');
+  // Reading never needs a token: show what is stored before anything else.
+  try {
+    await openLocal();
+    const persisted = await requestPersistence();
+    log(`opslag blijvend: ${persisted === null ? 'onbekend (niet ondersteund)' : persisted ? 'ja' : 'nee (kan door iOS gewist worden)'}`);
+    if (local) log(`lokaal: ${local.md} md, ${local.folders} mappen, ${local.otherFiles} andere; laatste sync ${new Date(local.lastSyncAt).toLocaleString('nl-NL')}`);
+    else log('lokaal nog leeg: eerste sync nodig');
+  } catch (e: any) { log('IndexedDB: ' + e.message); }
+  render();
+  if (valid()) { log('bestaand token gebruikt'); await update(); }
+  else if (token) log('token verlopen bij opstart; tik op Bijwerken');
 }
 
 // Load Google Identity Services, then start.
