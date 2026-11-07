@@ -12,7 +12,7 @@ import type { SyncStats, TreeNode } from './sync/types';
 import { driveUrl, listFolder, noteTitle, parseRoute, splitPrefix, urlFor, type Route } from './nav';
 import { previewOf, renderMarkdown, splitFrontmatter } from './markdown';
 
-const CARD_LIMIT = 12; // up to this many entries a folder shows cards; longer lists get compact rows (Jelle, V2)
+const CARD_LIMIT = 5; // up to this many entries a folder shows cards; more than that gets compact rows (Jelle, 7-11; was 12). The root always shows cards.
 
 /* ---------------- small helpers ---------------- */
 
@@ -25,6 +25,11 @@ function Tile({ iso, prefix }: { iso?: string; prefix?: string | null }) {
 }
 const Back = () => <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>;
 const FolderIcon = () => <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>;
+
+/** Floating at the bottom, so "Terug" is reachable at any scroll position, also at the end of a long note. */
+function BackButton({ onClick }: { onClick: () => void }) {
+  return <button className="back" onClick={onClick}><i><Back /></i>Terug</button>;
+}
 
 /* ---------------- app ---------------- */
 
@@ -234,7 +239,7 @@ function FolderView({ folder, isRoot, kids, byId, mdCount, db, go, goBack }: Fol
   const open = (n: TreeNode) => go(n.isFolder ? { kind: 'folder', id: n.id } : { kind: 'note', id: n.id, heading: null });
   return (
     <section className="A">
-      {!isRoot && <button className="back" onClick={() => goBack(parentRoute)}><i><Back /></i>Terug</button>}
+      {!isRoot && <BackButton onClick={() => goBack(parentRoute)} />}
       {!isRoot && <Crumbs node={folder} byId={byId} go={go} />}
       <h1>{title}</h1>
       <p className="sub">{folders.length} {folders.length === 1 ? 'map' : 'mappen'} · {notes.length} {notes.length === 1 ? 'notitie' : 'notities'}{others.length ? ` · ${others.length} andere` : ''}</p>
@@ -349,7 +354,7 @@ function NoteView({ node, heading, db, index, byId, go, goBack }: NoteProps) {
 
   return (
     <section className="A">
-      <button className="back" onClick={() => goBack(parentRoute)}><i><Back /></i>Terug</button>
+      <BackButton onClick={() => goBack(parentRoute)} />
       <Crumbs node={node} byId={byId} go={go} />
       <article className="note" ref={articleRef} onClick={onClick}>
         {!parsed?.hasH1 && <h1>{noteTitle(node)}</h1>}

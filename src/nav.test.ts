@@ -21,10 +21,10 @@ describe('routes', () => {
 });
 
 describe('ordering', () => {
-  it('puts 00-03 first in numeric order and _Inbox last', () => {
-    const names = ['_Inbox', '03 Archive', '00 Resources', 'Media', '02 Areas', '01 Projects', '10 Later'];
+  it('puts 00-03 first, _Inbox after the rest, and hidden tool folders (.claude, .obsidian) last', () => {
+    const names = ['.obsidian', '_Inbox', '03 Archive', '.claude', '00 Resources', 'Media', '02 Areas', '01 Projects', '10 Later'];
     const sorted = names.map(folder).sort(compareFolders).map((n) => n.name);
-    expect(sorted).toEqual(['00 Resources', '01 Projects', '02 Areas', '03 Archive', '10 Later', 'Media', '_Inbox']);
+    expect(sorted).toEqual(['00 Resources', '01 Projects', '02 Areas', '03 Archive', '10 Later', 'Media', '_Inbox', '.claude', '.obsidian']);
   });
   it('sorts numbers naturally inside folders (2 before 10)', () => {
     const l = listFolder([node('note 10.md'), node('note 2.md'), node('.DS_Store'), node('plaatje.png'), folder('b'), folder('a')]);

@@ -21,8 +21,9 @@ export function urlFor(r: Route): string {
   return r.id ? `/f/${encodeURIComponent(r.id)}` : '/';
 }
 
-/** PARA order: "00 …" to "03 …" first (numeric), other names alphabetical, names starting with "_" (like _Inbox) last. */
+/** PARA order: "00 …" to "03 …" first (numeric), other names alphabetical, then "_" names (_Inbox), and hidden tool folders (.claude, .obsidian, …) at the very end. */
 function rank(name: string): number {
+  if (name.startsWith('.')) return 4;
   if (name.startsWith('_')) return 3;
   return /^\d\d(\s|$)/.test(name) ? 0 : 1;
 }
