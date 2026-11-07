@@ -26,7 +26,7 @@ function Tile({ iso, prefix }: { iso?: string; prefix?: string | null }) {
 const Back = () => <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>;
 const FolderIcon = () => <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>;
 
-/** Floating at the bottom, so "Terug" is reachable at any scroll position, also at the end of a long note. */
+/** Lives in the fixed top bar, which hides while scrolling down and returns on a short scroll up. */
 function BackButton({ onClick }: { onClick: () => void }) {
   return <button className="back" onClick={onClick}><i><Back /></i>Terug</button>;
 }
@@ -153,6 +153,23 @@ export function App() {
     if (ready && !startedSync.current && hasValidToken()) { startedSync.current = true; update(); }
   }, [ready, update]);
 
+  /* --- top bar: back button + hide on scroll down, show on a short scroll up --- */
+  const [barHidden, setBarHidden] = useState(false);
+  useEffect(() => {
+    let last = window.scrollY, acc = 0;
+    const onScroll = () => {
+      const y = window.scrollY, dy = y - last; last = y;
+      if (y < 60) { acc = 0; setBarHidden(false); return; }
+      if ((dy > 0) !== (acc > 0)) acc = 0; // direction changed
+      acc += dy;
+      if (acc > 12) setBarHidden(true);
+      else if (acc < -24) setBarHidden(false);
+    };
+    addEventListener('scroll', onScroll, { passive: true });
+    return () => removeEventListener('scroll', onScroll);
+  }, []);
+  useEffect(() => { setBarHidden(false); }, [route]);
+
   /* --- rendering --- */
   const hasData = nodes.length > 0;
   const expired = !hasValidToken();
@@ -182,13 +199,21 @@ export function App() {
       : <Missing go={go} what="Deze map" />;
   }
 
+  const shownNode = route.kind === 'note' || route.kind === 'folder' ? (route.id ? byId.get(route.id) : undefined) : undefined;
+  const showBack = ready && (route.kind === 'sync' || (!!shownNode && shownNode !== rootNode));
+  const backTo: Route = shownNode?.parent && byId.get(shownNode.parent)?.parent ? { kind: 'folder', id: shownNode.parent } : rootRoute;
+
   return (
     <div className="app">
-      <header className="topbar">
-        <button className="chip" onClick={() => go(rootRoute)} aria-label="Naar het begin">Vault</button>
+      <header className={'topbar' + (barHidden ? ' hidden' : '')}>
+        <div className="in">
+        {showBack
+          ? <BackButton onClick={() => goBack(backTo)} />
+          : <button className="chip" onClick={() => go(rootRoute)} aria-label="Naar het begin">Vault</button>}
         <span className="sp" />
         {hasData && <button className="chip accent" onClick={update} disabled={busy} aria-label="Bijwerken vanuit Google Drive">{busy ? 'Bezig…' : expired ? 'Bijwerken ⟳' : 'Bijwerken'}</button>}
         <button className="chip" onClick={() => go({ kind: 'sync' })} aria-label="Sync-status en log">Status</button>
+        </div>
       </header>
       {screen}
     </div>
@@ -239,7 +264,6 @@ function FolderView({ folder, isRoot, kids, byId, mdCount, db, go, goBack }: Fol
   const open = (n: TreeNode) => go(n.isFolder ? { kind: 'folder', id: n.id } : { kind: 'note', id: n.id, heading: null });
   return (
     <section className="A">
-      {!isRoot && <BackButton onClick={() => goBack(parentRoute)} />}
       {!isRoot && <Crumbs node={folder} byId={byId} go={go} />}
       <h1>{title}</h1>
       <p className="sub">{folders.length} {folders.length === 1 ? 'map' : 'mappen'} · {notes.length} {notes.length === 1 ? 'notitie' : 'notities'}{others.length ? ` · ${others.length} andere` : ''}</p>
@@ -354,7 +378,6 @@ function NoteView({ node, heading, db, index, byId, go, goBack }: NoteProps) {
 
   return (
     <section className="A">
-      <BackButton onClick={() => goBack(parentRoute)} />
       <Crumbs node={node} byId={byId} go={go} />
       <article className="note" ref={articleRef} onClick={onClick}>
         {!parsed?.hasH1 && <h1>{noteTitle(node)}</h1>}
