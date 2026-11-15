@@ -1,5 +1,5 @@
 // In-memory Drive for tests: same interface as the real client, plus a change log.
-import { AuthError, ChangesTokenError, type Drive } from './drive';
+import { AuthError, ChangesBacklogError, ChangesTokenError, type Drive, type ListChangesOptions } from './drive';
 import { FOLDER_MIME, type DriveChange, type DriveFile } from './types';
 
 export class FakeDrive implements Drive {
@@ -11,6 +11,9 @@ export class FakeDrive implements Drive {
   failDownload = new Set<string>();
   authExpired = false;
   invalidTokens = false;
+  /** Methods that never settle, like a request that hangs on a phone network. */
+  hang = new Set<string>();
+  changesPageSize = 1000;
   private v = 1;
 
   constructor(public rootName = 'Life OS') {
@@ -44,10 +47,14 @@ export class FakeDrive implements Drive {
     return [...this.files.values()].filter((f) => !f.trashed && f.parents && ids.includes(f.parents[0]) && (opts?.foldersToo || f.mimeType !== FOLDER_MIME)).map((f) => ({ ...f }));
   }
   async getStartPageToken() { this.check(); return String(this.log.length); }
-  async listChanges(token: string) {
+  async listChanges(token: string, opts?: ListChangesOptions) {
     this.check();
+    if (this.hang.has('listChanges')) return new Promise<never>(() => {});
     if (this.invalidTokens) throw new ChangesTokenError();
-    return { changes: this.log.slice(Number(token)).map((c) => ({ ...c })), newStartPageToken: String(this.log.length) };
+    const changes = this.log.slice(Number(token)).map((c) => ({ ...c }));
+    const pages = Math.max(1, Math.ceil(changes.length / this.changesPageSize));
+    if (opts?.maxPages && pages > opts.maxPages) throw new ChangesBacklogError(opts.maxPages * this.changesPageSize);
+    return { changes, newStartPageToken: String(this.log.length), pages };
   }
   async download(id: string) {
     this.check();

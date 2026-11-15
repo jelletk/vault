@@ -41,6 +41,12 @@ a { text-decoration: none; }
 .btn.secondary { background: var(--card); color: var(--ink); box-shadow: var(--shadow); }
 .btn:disabled { opacity: .5; }
 
+/* sync notice (H2a): a card above every screen after a failed or incomplete sync */
+.notice { background: var(--card); border-radius: 16px; padding: 12px 14px 6px; margin: 0 0 16px; box-shadow: var(--shadow); border-left: 4px solid #c2410c; font-size: 14px; }
+.notice.info { border-left-color: var(--accent); }
+.notice p { margin: 0 0 6px; }
+.notice .btn { padding: 10px 14px; font-size: 14px; }
+
 h1 { font-size: 30px; line-height: 1.1; margin: 0 0 4px; font-weight: 800; letter-spacing: -.02em; text-wrap: balance; overflow-wrap: anywhere; }
 .sub { color: var(--mute); margin: 0 0 14px; font-size: 14px; }
 .big { font-size: 44px; font-weight: 800; margin: 8px 0; } .big small { font-size: 15px; font-weight: 600; color: var(--mute); }

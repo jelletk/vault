@@ -5,7 +5,8 @@ import type { IDBPDatabase } from 'idb';
 import { accessToken, dropToken, getToken, hasValidToken, loadGoogleScript, revokeToken, signInPopup } from './auth';
 import { createDrive } from './sync/drive';
 import { loadContent, loadTree, openVault, requestPersistence, wipeAll } from './sync/db';
-import { runSync } from './sync/sync';
+import { runSync, withWatchdog, WATCHDOG_MS } from './sync/sync';
+import { describeIncomplete, describeSyncError, type SyncNotice } from './sync/messages';
 import { buildLinkIndex } from './sync/links';
 import { summarize } from './sync/paths';
 import type { SyncStats, TreeNode } from './sync/types';
@@ -39,6 +40,9 @@ export function App() {
   const [nodes, setNodes] = useState<TreeNode[]>([]);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [notice, setNotice] = useState<SyncNotice | null>(null);
+  const [lastAttempt, setLastAttempt] = useState<Attempt | null>(null);
   const [lines, setLines] = useState<string[]>([]);
   const [route, setRoute] = useState<Route>(() => parseRoute(location.pathname, location.hash));
   const [, tick] = useState(0);
@@ -97,12 +101,24 @@ export function App() {
     if (!db) { setNodes([]); setLastSyncAt(null); return; }
     setNodes(await loadTree(db));
     setLastSyncAt(((await db.get('meta', 'lastSyncAt')) as number | undefined) ?? null);
+    setLastAttempt(((await db.get('meta', 'lastAttempt')) as Attempt | undefined) ?? null);
+  }, []);
+
+  // Remembered on the device, so Status still shows why the last try failed after a restart.
+  const saveAttempt = useCallback(async (a: Attempt) => {
+    setLastAttempt(a);
+    try { if (dbRef.current) await dbRef.current.put('meta', a, 'lastAttempt'); } catch { /* reading still works */ }
   }, []);
 
   // One path for both buttons. The popup call is the first thing that happens in the tap (Safari needs the gesture).
+  // A sync always ends: every Drive request has a deadline, and the watchdog stops the run after
+  // WATCHDOG_MS without progress. `busy` is cleared in `finally`, whatever happened.
   const runUpdate = useCallback(async (prompt: '' | 'consent') => {
-    if (busy) return;
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
+    setNotice(null);
+    const at = Date.now();
     try {
       if (prompt === 'consent' || !hasValidToken()) {
         log(prompt === 'consent' ? "popup-login (prompt='consent')" : "token verlopen: popup-login (prompt='')");
@@ -110,28 +126,39 @@ export function App() {
         log('popup-login ok');
       }
       if (!dbRef.current) dbRef.current = await openVault();
-      const stats: SyncStats = await runSync(createDrive(accessToken), dbRef.current, (m) => log(m));
-      log(`sync klaar (${stats.mode}) in ${(stats.durationMs / 1000).toFixed(1)} s: ${stats.md} md, ${stats.folders} mappen, ${stats.otherFiles} andere; `
+      const db = dbRef.current;
+      log('sync gestart');
+      const stats: SyncStats = await withWatchdog((signal, ping) => {
+        const step = (m: string) => { ping(m); log(m); };
+        const drive = createDrive(accessToken, fetch, { signal, onEvent: step, onActivity: () => ping() });
+        return runSync(drive, db, step, Date.now, { signal, onActivity: () => ping() });
+      }, WATCHDOG_MS);
+      log(`sync klaar (${stats.mode === 'full' ? 'volledig' : 'incrementeel'}${stats.fullReason ? ', omdat ' + stats.fullReason : ''}) in ${(stats.durationMs / 1000).toFixed(1)} s: ${stats.md} md, ${stats.folders} mappen, ${stats.otherFiles} andere; `
         + `${stats.downloaded} gedownload, ${stats.skippedUnchanged} ongewijzigd, +${stats.added} ~${stats.modified} -${stats.removed}, ${stats.apiCalls} API-calls`
         + (stats.failedDownloads ? `, ${stats.failedDownloads} MISLUKT` : ''));
+      if (stats.failedDownloads) setNotice(describeIncomplete(stats.failedDownloads));
+      await saveAttempt({ at, ok: true, text: stats.failedDownloads ? describeIncomplete(stats.failedDownloads).text : '' });
       await reload();
     } catch (e: any) {
-      if (e?.name === 'AuthError') { dropToken(); log('token verlopen of afgewezen; opgeslagen notities blijven leesbaar. Tik op Bijwerken.'); }
-      else log('FOUT: ' + (e?.message ?? e));
-    } finally { setBusy(false); tick((x) => x + 1); }
-  }, [busy, log, reload]);
+      const n = describeSyncError(e);
+      if (n.kind === 'auth') dropToken();
+      setNotice(n);
+      log('FOUT: ' + n.text + (e?.message && !n.text.includes(e.message) ? ` [${e.message}]` : ''));
+      await saveAttempt({ at, ok: false, text: n.text });
+    } finally { busyRef.current = false; setBusy(false); tick((x) => x + 1); }
+  }, [log, reload, saveAttempt]);
   const update = useCallback(() => runUpdate(''), [runUpdate]);
   const firstLogin = useCallback(() => runUpdate('consent'), [runUpdate]);
 
   const logout = useCallback(async () => {
-    if (busy) return;
+    if (busyRef.current) return;
     revokeToken(); dropToken();
     await wipeAll(dbRef.current);
     dbRef.current = null;
-    setNodes([]); setLastSyncAt(null);
+    setNodes([]); setLastSyncAt(null); setLastAttempt(null); setNotice(null);
     log('uitgelogd; lokale notities en caches gewist');
     go({ kind: 'folder', id: null }, true);
-  }, [busy, go, log]);
+  }, [go, log]);
 
   // startup: open IndexedDB (no token needed), ask for persistent storage, sync only if the token is still valid
   useEffect(() => {
@@ -177,7 +204,7 @@ export function App() {
   let screen: ReactNode;
   if (!ready) screen = <p className="sub">Laden…</p>;
   else if (route.kind === 'sync') {
-    screen = <SyncView nodes={nodes} lastSyncAt={lastSyncAt} busy={busy} lines={lines} update={update} login={firstLogin} logout={logout} />;
+    screen = <SyncView nodes={nodes} lastSyncAt={lastSyncAt} lastAttempt={lastAttempt} busy={busy} lines={lines} update={update} login={firstLogin} logout={logout} />;
   } else if (!hasData) {
     screen = (
       <section>
@@ -215,7 +242,22 @@ export function App() {
         <button className="chip" onClick={() => go({ kind: 'sync' })} aria-label="Sync-status en log">Status</button>
         </div>
       </header>
+      {notice && ready && <Notice notice={notice} busy={busy} retry={update} dismiss={() => setNotice(null)} />}
       {screen}
+    </div>
+  );
+}
+
+interface Attempt { at: number; ok: boolean; text: string }
+
+/** Shown above every screen after a failed or incomplete sync, with a way to try again. */
+function Notice({ notice, busy, retry, dismiss }: { notice: SyncNotice; busy: boolean; retry: () => void; dismiss: () => void }) {
+  const title = notice.kind === 'info' ? 'Bijwerken onvolledig.' : 'Bijwerken mislukt.';
+  return (
+    <div className={'notice ' + notice.kind} role={notice.kind === 'info' ? 'status' : 'alert'}>
+      <p><b>{title}</b> {notice.text}</p>
+      <button className="btn" onClick={retry} disabled={busy}>{busy ? 'Bezig…' : notice.kind === 'auth' ? 'Opnieuw inloggen' : 'Opnieuw proberen'}</button>
+      <button className="btn secondary" onClick={dismiss}>Sluiten</button>
     </div>
   );
 }
@@ -396,11 +438,11 @@ function NoteView({ node, heading, db, index, byId, go, goBack }: NoteProps) {
 /* ---------------- sync / status ---------------- */
 
 interface SyncProps {
-  nodes: TreeNode[]; lastSyncAt: number | null; busy: boolean; lines: string[];
+  nodes: TreeNode[]; lastSyncAt: number | null; lastAttempt: Attempt | null; busy: boolean; lines: string[];
   update: () => void; login: () => void; logout: () => void;
 }
 
-function SyncView({ nodes, lastSyncAt, busy, lines, update, login, logout }: SyncProps) {
+function SyncView({ nodes, lastSyncAt, lastAttempt, busy, lines, update, login, logout }: SyncProps) {
   const standalone = (navigator as any).standalone === true || matchMedia('(display-mode: standalone)').matches;
   const tok = getToken();
   const left = tok ? Math.round((tok.expires_at - Date.now()) / 60000) : 0;
@@ -415,6 +457,9 @@ function SyncView({ nodes, lastSyncAt, busy, lines, update, login, logout }: Syn
         {hasValidToken() ? `Ingelogd, token nog ±${left} min geldig.` : tok ? 'Token verlopen. Lezen kan nog; tik op Bijwerken om te vernieuwen.' : nodes.length ? 'Geen geldig token. Lezen kan nog; tik op Bijwerken.' : 'Niet ingelogd.'}
         {lastSyncAt ? ` Laatst bijgewerkt ${new Date(lastSyncAt).toLocaleString('nl-NL')}.` : ''}
       </p>
+      {lastAttempt && !lastAttempt.ok && (
+        <p className="sub">Laatste poging {new Date(lastAttempt.at).toLocaleString('nl-NL')} mislukt: {lastAttempt.text}</p>
+      )}
       {nodes.length ? <button className="btn" onClick={update} disabled={busy}>{busy ? 'Bezig…' : 'Bijwerken'}</button> : <button className="btn" onClick={login} disabled={busy}>Inloggen met Google</button>}
       {nodes.length > 0 && <button className="btn secondary" onClick={logout} disabled={busy}>Uitloggen</button>}
       <pre className="log">{lines.join('\n') || '(nog geen log)'}</pre>

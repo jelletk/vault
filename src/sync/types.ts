@@ -68,6 +68,8 @@ export interface SyncStats {
   modified: number;
   apiCalls: number;
   failedDownloads: number;
+  /** Why an incremental run fell back to a full sync, if it did. */
+  fullReason?: string;
 }
 
 export type Progress = (msg: string) => void;
