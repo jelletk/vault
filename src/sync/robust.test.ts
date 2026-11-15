@@ -1,7 +1,7 @@
 // R2 regressions (H2a): commit boundary, md status, root loss, real logout wipe.
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it } from 'vitest';
-import { openVault, wipeAll } from './db';
+import { finishPendingWipe, openVault, wipeAll } from './db';
 import { RootLostError, runSync } from './sync';
 import { AuthError } from './drive';
 import { seed } from './fakeDrive';
@@ -125,5 +125,31 @@ describe('R2-17: echte uitlog-flow', () => {
     expect(await again.get('meta', 'changesToken')).toBeUndefined();
     // a fresh start after logout does a full sync again
     expect((await runSync(seed(), again)).mode).toBe('full');
+  });
+});
+
+describe('uitloggen als de opslag vastzit (15-11: Uitloggen bleef geblokkeerd)', () => {
+  const g = globalThis as any;
+  let store: Map<string, string>;
+  const realLS = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  afterEach(() => { if (realLS) Object.defineProperty(globalThis, 'localStorage', realLS); else delete g.localStorage; });
+  it('wissen dat geblokkeerd wordt, wacht niet eeuwig en wordt bij de volgende start afgemaakt', async () => {
+    store = new Map();
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+      getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k),
+    } });
+    const name = fresh();
+    const db = await openVault(name);
+    await runSync(seed(), db);
+    const other = await openVault(name); // a second connection that never closes blocks the delete
+    const t0 = Date.now();
+    expect(await wipeAll(db, name, 100)).toBe(false);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(store.get('vault.wipePending')).toBe(name);
+    other.close();
+    expect(await finishPendingWipe()).toBe(true);
+    expect(store.has('vault.wipePending')).toBe(false);
+    const again = await openVault(name);
+    expect(await again.count('tree')).toBe(0);
   });
 });

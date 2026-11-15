@@ -30,6 +30,11 @@ export class RootLostError extends Error {
   }
 }
 
+/** The sync was stopped on purpose (logout). Not an error for the user. */
+export class SyncStoppedError extends Error {
+  constructor() { super('sync gestopt'); this.name = 'SyncStoppedError'; }
+}
+
 export interface SyncOptions {
   signal?: AbortSignal;
   maxChangePages?: number;
@@ -193,7 +198,7 @@ export async function runSync(drive: Drive, db: IDBPDatabase, progress: Progress
  * Runs a sync with a watchdog: when `run` reports no progress for `idleMs`, the signal is aborted
  * and the returned promise rejects with SyncStalledError, even if something inside never settles.
  */
-export async function withWatchdog<T>(run: (signal: AbortSignal, ping: (step?: string) => void) => Promise<T>, idleMs = WATCHDOG_MS): Promise<T> {
+export async function withWatchdog<T>(run: (signal: AbortSignal, ping: (step?: string) => void) => Promise<T>, idleMs = WATCHDOG_MS, stop?: AbortSignal): Promise<T> {
   const ctrl = new AbortController();
   let step = 'start';
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -206,12 +211,15 @@ export async function withWatchdog<T>(run: (signal: AbortSignal, ping: (step?: s
   };
   const ping = (s?: string) => { if (s) step = s; arm(); };
   arm();
+  const onStop = () => { const e = new SyncStoppedError(); ctrl.abort(e); stall(e); };
+  if (stop?.aborted) onStop(); else stop?.addEventListener('abort', onStop, { once: true });
   const running = run(ctrl.signal, ping);
   running.catch(() => {});
   try {
     return await Promise.race([running, stalled]);
   } finally {
     clearTimeout(timer);
+    stop?.removeEventListener('abort', onStop);
     if (!ctrl.signal.aborted) ctrl.abort(new Error('sync afgerond')); // stops stragglers after a failure
   }
 }

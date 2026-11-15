@@ -3,7 +3,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { openVault } from './db';
-import { SyncStalledError, runSync, withWatchdog } from './sync';
+import { SyncStalledError, SyncStoppedError, runSync, withWatchdog } from './sync';
 import { seed } from './fakeDrive';
 import type { ContentRecord } from './types';
 
@@ -51,6 +51,22 @@ describe('een sync eindigt altijd', () => {
       'gedownload 1/1',
       'opslaan',
     ]));
+  });
+});
+
+describe('stoppen van buitenaf (uitloggen tijdens een hangende sync)', () => {
+  it('een hangende sync stopt direct als hij wordt gestopt, zonder iets te schrijven', async () => {
+    const d = seed(), db = await open();
+    await runSync(d, db);
+    const token = await db.get('meta', 'changesToken');
+    d.hang.add('listChanges');
+    const stop = new AbortController();
+    const p = withWatchdog((signal, ping) => runSync(d, db, ping, Date.now, { signal }), 60_000, stop.signal);
+    setTimeout(() => stop.abort(), 20);
+    const t0 = Date.now();
+    await expect(p).rejects.toBeInstanceOf(SyncStoppedError);
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(await db.get('meta', 'changesToken')).toBe(token);
   });
 });
 

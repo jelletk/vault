@@ -2,6 +2,13 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { readFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+
+// Shown on Status, so a screenshot tells which build a phone runs.
+function buildId(): string {
+  const sha = process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? (() => { try { return execSync('git rev-parse --short HEAD').toString().trim(); } catch { return 'onbekend'; } })();
+  return `${sha} (${new Date().toISOString().slice(0, 10)})`;
+}
 
 // `npm run preview` / `npm run dev` send the same security headers as Vercel, so the CSP is tested locally too.
 const vercel = JSON.parse(readFileSync(new URL('./vercel.json', import.meta.url), 'utf8'));
@@ -10,6 +17,7 @@ for (const h of vercel.headers) if (h.source === '/(.*)') for (const x of h.head
 
 export default defineConfig({
   base: '/',
+  define: { __BUILD__: JSON.stringify(buildId()) },
   preview: { headers },
   // Never inline assets as data: URLs; the CSP (font-src 'self') would block the inlined font.
   build: { assetsInlineLimit: 0 },

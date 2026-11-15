@@ -4,14 +4,23 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import type { IDBPDatabase } from 'idb';
 import { NeedTapError, accessToken, dropToken, getToken, googleReady, hasValidToken, loadGoogleScript, revokeToken, signInPopup } from './auth';
 import { createDrive } from './sync/drive';
-import { loadContent, loadTree, openVault, requestPersistence, wipeAll } from './sync/db';
-import { runSync, withWatchdog, WATCHDOG_MS } from './sync/sync';
+import { finishPendingWipe, loadContent, loadTree, openVault, requestPersistence, wipeAll } from './sync/db';
+import { SyncStoppedError, runSync, withWatchdog, WATCHDOG_MS } from './sync/sync';
 import { describeIncomplete, describeSyncError, type SyncNotice } from './sync/messages';
 import { buildLinkIndex } from './sync/links';
 import { summarize } from './sync/paths';
 import type { ContentRecord, SyncStats, TreeNode } from './sync/types';
 import { driveUrl, listFolder, noteTitle, parseRoute, splitPrefix, urlFor, type Route } from './nav';
 import { previewOf, renderMarkdown, splitFrontmatter } from './markdown';
+
+/** Resolves with the value, or with `fallback` after `ms`: for local steps that must never keep the app busy. */
+function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    p.then((v) => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(fallback); });
+  });
+}
+const LOCAL_MS = 10_000;
 
 const CARD_LIMIT = 5; // up to this many entries a folder shows cards; more than that gets compact rows (Jelle, 7-11; was 12). The root always shows cards.
 
@@ -43,6 +52,9 @@ export function App() {
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  // Stops the running sync (logout). `session` changes on logout, so a run that started before cannot write afterwards.
+  const stopRef = useRef<AbortController | null>(null);
+  const session = useRef(0);
   const [notice, setNotice] = useState<SyncNotice | null>(null);
   const [lastAttempt, setLastAttempt] = useState<Attempt | null>(null);
   const [lines, setLines] = useState<string[]>([]);
@@ -110,7 +122,7 @@ export function App() {
   // Remembered on the device, so Status still shows why the last try failed after a restart.
   const saveAttempt = useCallback(async (a: Attempt) => {
     setLastAttempt(a);
-    try { if (dbRef.current) await dbRef.current.put('meta', a, 'lastAttempt'); } catch { /* reading still works */ }
+    try { if (dbRef.current) await within(dbRef.current.put('meta', a, 'lastAttempt'), LOCAL_MS, undefined); } catch { /* reading still works */ }
   }, []);
 
   // One path for both buttons. The popup call is the first thing that happens in the tap (Safari needs the gesture).
@@ -122,6 +134,10 @@ export function App() {
     setBusy(true);
     setNotice(null);
     const at = Date.now();
+    const mine = session.current;
+    const stop = new AbortController();
+    stopRef.current = stop;
+    const stillMine = () => { if (session.current !== mine || stop.signal.aborted) throw new SyncStoppedError(); };
     try {
       if (prompt === 'consent' || !hasValidToken()) {
         if (!googleReady()) {
@@ -135,46 +151,64 @@ export function App() {
         await signInPopup(prompt);
         log('popup-login ok');
       }
-      if (!dbRef.current) dbRef.current = await openVault();
+      stillMine();
+      if (!dbRef.current) {
+        const opened = await within(openVault(), LOCAL_MS, null);
+        if (!opened) throw new Error('de opslag op dit toestel reageert niet; sluit de app helemaal en open hem opnieuw');
+        dbRef.current = opened;
+      }
+      stillMine();
       const db = dbRef.current;
       log('sync gestart');
       const stats: SyncStats = await withWatchdog((signal, ping) => {
         const step = (m: string) => { ping(m); log(m); };
         const drive = createDrive(accessToken, fetch, { signal, onEvent: step, onActivity: () => ping() });
         return runSync(drive, db, step, Date.now, { signal, onActivity: () => ping() });
-      }, WATCHDOG_MS);
+      }, WATCHDOG_MS, stop.signal);
       log(`sync klaar (${stats.mode === 'full' ? 'volledig' : 'incrementeel'}${stats.fullReason ? ', omdat ' + stats.fullReason : ''}) in ${(stats.durationMs / 1000).toFixed(1)} s: ${stats.md} md, ${stats.folders} mappen, ${stats.otherFiles} andere; `
         + `${stats.downloaded} gedownload, ${stats.skippedUnchanged} ongewijzigd, +${stats.added} ~${stats.modified} -${stats.removed}, ${stats.apiCalls} API-calls`
         + (stats.failedDownloads ? `, ${stats.failedDownloads} MISLUKT` : ''));
       if (stats.failedDownloads) setNotice(describeIncomplete(stats.failedDownloads));
       await saveAttempt({ at, ok: true, text: stats.failedDownloads ? describeIncomplete(stats.failedDownloads).text : '' });
-      await reload();
+      await within(reload(), LOCAL_MS, undefined);
     } catch (e: any) {
+      if (e?.name === 'SyncStoppedError' || session.current !== mine) { log('sync gestopt'); return; }
       const n = describeSyncError(e);
       if (n.kind === 'auth') dropToken();
       setNotice(n);
       if (n.kind === 'tap') { log(n.text); return; } // not a failure: the popup just needs a fresh tap
       log('FOUT: ' + n.text + (e?.message && !n.text.includes(e.message) ? ` [${e.message}]` : ''));
       await saveAttempt({ at, ok: false, text: n.text });
-    } finally { busyRef.current = false; setBusy(false); tick((x) => x + 1); }
+    } finally {
+      if (stopRef.current === stop) stopRef.current = null;
+      if (session.current === mine) { busyRef.current = false; setBusy(false); }
+      tick((x) => x + 1);
+    }
   }, [log, reload, saveAttempt]);
   const update = useCallback(() => runUpdate(''), [runUpdate]);
   const firstLogin = useCallback(() => runUpdate('consent'), [runUpdate]);
 
+  // Always possible, also while a sync runs or hangs: it stops that sync first (H2a, 15-11: "Uitloggen" stayed blocked).
   const logout = useCallback(async () => {
-    if (busyRef.current) return;
+    session.current++;
+    stopRef.current?.abort(new SyncStoppedError());
+    stopRef.current = null;
     revokeToken(); dropToken();
-    await wipeAll(dbRef.current);
+    const db = dbRef.current;
     dbRef.current = null;
     setNodes([]); setLastSyncAt(null); setLastAttempt(null); setNotice(null);
-    log('uitgelogd; lokale notities en caches gewist');
+    busyRef.current = false; setBusy(false);
+    const wiped = await wipeAll(db);
+    log(wiped ? 'uitgelogd; lokale notities en caches gewist' : 'uitgelogd; het wissen van de opslag wordt bij de volgende start afgemaakt');
     go({ kind: 'folder', id: null }, true);
   }, [go, log]);
 
   // startup: open IndexedDB (no token needed), ask for persistent storage, sync only if the token is still valid
   useEffect(() => {
     (async () => {
+      log(`Vault versie ${__BUILD__}`);
       try {
+        if (await within(finishPendingWipe(), LOCAL_MS, false)) log('wissen van een eerdere uitlog afgemaakt');
         dbRef.current = await openVault();
         const persisted = await requestPersistence();
         log(`opslag blijvend: ${persisted === null ? 'onbekend (niet ondersteund)' : persisted ? 'ja' : 'nee (kan door iOS gewist worden)'}`);
@@ -478,7 +512,8 @@ function SyncView({ nodes, lastSyncAt, lastAttempt, busy, lines, update, login, 
         <p className="sub">Laatste poging {new Date(lastAttempt.at).toLocaleString('nl-NL')} mislukt: {lastAttempt.text}</p>
       )}
       {nodes.length ? <button className="btn" onClick={update} disabled={busy}>{busy ? 'Bezig…' : 'Bijwerken'}</button> : <button className="btn" onClick={login} disabled={busy}>Inloggen met Google</button>}
-      {nodes.length > 0 && <button className="btn secondary" onClick={logout} disabled={busy}>Uitloggen</button>}
+      {nodes.length > 0 && <button className="btn secondary" onClick={logout}>Uitloggen</button>}
+      <p className="sub">Versie {__BUILD__}</p>
       <pre className="log">{lines.join('\n') || '(nog geen log)'}</pre>
     </section>
   );
