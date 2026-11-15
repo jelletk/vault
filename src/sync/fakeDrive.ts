@@ -14,6 +14,8 @@ export class FakeDrive implements Drive {
   /** Methods that never settle, like a request that hangs on a phone network. */
   hang = new Set<string>();
   changesPageSize = 1000;
+  /** After this many successful downloads the token "expires" (AuthError on every later call). */
+  authExpireAfterDownloads: number | null = null;
   private v = 1;
 
   constructor(public rootName = 'Life OS') {
@@ -33,6 +35,7 @@ export class FakeDrive implements Drive {
     return f;
   }
   setText(id: string, text: string) { const f = this.files.get(id)!; this.put(id, f.name, f.parents![0], { text }); }
+  rename(id: string, name: string) { const f = { ...this.files.get(id)!, name }; this.files.set(id, f); this.log.push({ fileId: id, file: { ...f } }); }
   move(id: string, parent: string) { const f = this.files.get(id)!; this.files.set(id, { ...f, parents: [parent] }); this.log.push({ fileId: id, file: { ...this.files.get(id)! } }); }
   remove(id: string) { this.files.delete(id); this.log.push({ fileId: id, removed: true }); }
   trash(id: string) { const f = { ...this.files.get(id)!, trashed: true }; this.files.set(id, f); this.log.push({ fileId: id, file: f }); }
@@ -59,6 +62,8 @@ export class FakeDrive implements Drive {
   async download(id: string) {
     this.check();
     this.downloads.push(id);
+    await new Promise((r) => setTimeout(r, 1)); // a real network answer arrives later; lets workers interleave
+    if (this.authExpireAfterDownloads !== null && this.downloads.length > this.authExpireAfterDownloads) { this.authExpired = true; throw new AuthError(); }
     if (this.failDownload.has(id)) throw new Error('boom');
     return this.texts.get(id) ?? '';
   }

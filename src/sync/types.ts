@@ -68,6 +68,8 @@ export interface SyncStats {
   modified: number;
   apiCalls: number;
   failedDownloads: number;
+  /** Stored texts dropped because the item is no longer a markdown note. */
+  droppedTexts?: number;
   /** Why an incremental run fell back to a full sync, if it did. */
   fullReason?: string;
 }

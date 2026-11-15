@@ -6,11 +6,17 @@ export type Route =
   | { kind: 'note'; id: string; heading: string | null }
   | { kind: 'sync' };
 
+/** decodeURIComponent that never throws: a broken link (e.g. "/n/%") must give "Niet gevonden", not a crash. */
+function safeDecode(s: string): string | null {
+  try { return decodeURIComponent(s); } catch { return null; }
+}
+
 export function parseRoute(pathname: string, hash: string): Route {
-  const h = hash.startsWith('#') ? decodeURIComponent(hash.slice(1)) : '';
+  const h = hash.startsWith('#') ? safeDecode(hash.slice(1)) ?? '' : '';
   const m = pathname.match(/^\/([fn])\/([^/]+)\/?$/);
-  if (m && m[1] === 'n') return { kind: 'note', id: decodeURIComponent(m[2]), heading: h || null };
-  if (m && m[1] === 'f') return { kind: 'folder', id: decodeURIComponent(m[2]) };
+  // An undecodable id is kept raw; it matches no item, so the screen shows "Niet gevonden".
+  if (m && m[1] === 'n') return { kind: 'note', id: safeDecode(m[2]) ?? m[2], heading: h || null };
+  if (m && m[1] === 'f') return { kind: 'folder', id: safeDecode(m[2]) ?? m[2] };
   if (/^\/sync\/?$/.test(pathname)) return { kind: 'sync' };
   return { kind: 'folder', id: null };
 }

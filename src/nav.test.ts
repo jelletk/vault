@@ -20,6 +20,15 @@ describe('routes', () => {
   });
 });
 
+describe('kapotte links (R2-7)', () => {
+  it('ongeldige procentcodering geeft geen crash maar een route die niets vindt', () => {
+    expect(() => parseRoute('/n/%', '')).not.toThrow();
+    expect(parseRoute('/n/%', '')).toEqual({ kind: 'note', id: '%', heading: null });
+    expect(parseRoute('/f/%E0%A4%A', '')).toEqual({ kind: 'folder', id: '%E0%A4%A' });
+    expect(parseRoute('/n/abc', '#%')).toEqual({ kind: 'note', id: 'abc', heading: null });
+  });
+});
+
 describe('ordering', () => {
   it('puts 00-03 first, _Inbox after the rest, and hidden tool folders (.claude, .obsidian) last', () => {
     const names = ['.obsidian', '_Inbox', '03 Archive', '.claude', '00 Resources', 'Media', '02 Areas', '01 Projects', '10 Later'];

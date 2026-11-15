@@ -5,12 +5,12 @@ export function parentOf(f: DriveFile): string | null {
   return f.parents && f.parents.length ? f.parents[0] : null;
 }
 
-/** Walks the parent chain; true when it reaches rootId. Cycle-safe. */
+/** Walks the parent chain; true when it reaches rootId and the root itself is still known. Cycle-safe. */
 export function reachesRoot(id: string, rootId: string, all: Map<string, DriveFile>): boolean {
   const seen = new Set<string>();
   let cur: string | null = id;
   while (cur) {
-    if (cur === rootId) return true;
+    if (cur === rootId) return all.has(rootId);
     if (seen.has(cur)) return false;
     seen.add(cur);
     const f = all.get(cur);

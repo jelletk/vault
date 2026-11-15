@@ -2,14 +2,14 @@
 // Reading never needs a token: everything opens from IndexedDB. A token is only for "Bijwerken".
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import type { IDBPDatabase } from 'idb';
-import { accessToken, dropToken, getToken, hasValidToken, loadGoogleScript, revokeToken, signInPopup } from './auth';
+import { NeedTapError, accessToken, dropToken, getToken, googleReady, hasValidToken, loadGoogleScript, revokeToken, signInPopup } from './auth';
 import { createDrive } from './sync/drive';
 import { loadContent, loadTree, openVault, requestPersistence, wipeAll } from './sync/db';
 import { runSync, withWatchdog, WATCHDOG_MS } from './sync/sync';
 import { describeIncomplete, describeSyncError, type SyncNotice } from './sync/messages';
 import { buildLinkIndex } from './sync/links';
 import { summarize } from './sync/paths';
-import type { SyncStats, TreeNode } from './sync/types';
+import type { ContentRecord, SyncStats, TreeNode } from './sync/types';
 import { driveUrl, listFolder, noteTitle, parseRoute, splitPrefix, urlFor, type Route } from './nav';
 import { previewOf, renderMarkdown, splitFrontmatter } from './markdown';
 
@@ -38,6 +38,8 @@ export function App() {
   const dbRef = useRef<IDBPDatabase | null>(null);
   const [ready, setReady] = useState(false);
   const [nodes, setNodes] = useState<TreeNode[]>([]);
+  // Bumped after every reload from IndexedDB; open notes and previews re-read their text on a new version (R2-1).
+  const [version, setVersion] = useState(0);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -100,6 +102,7 @@ export function App() {
     const db = dbRef.current;
     if (!db) { setNodes([]); setLastSyncAt(null); return; }
     setNodes(await loadTree(db));
+    setVersion((v) => v + 1);
     setLastSyncAt(((await db.get('meta', 'lastSyncAt')) as number | undefined) ?? null);
     setLastAttempt(((await db.get('meta', 'lastAttempt')) as Attempt | undefined) ?? null);
   }, []);
@@ -121,6 +124,13 @@ export function App() {
     const at = Date.now();
     try {
       if (prompt === 'consent' || !hasValidToken()) {
+        if (!googleReady()) {
+          // Offline at startup, so the Google script is missing. Load it now; the popup needs a fresh tap.
+          log('Google-login nog niet geladen: nu laden');
+          await loadGoogleScript();
+          log('Google-login geladen');
+          throw new NeedTapError();
+        }
         log(prompt === 'consent' ? "popup-login (prompt='consent')" : "token verlopen: popup-login (prompt='')");
         await signInPopup(prompt);
         log('popup-login ok');
@@ -171,6 +181,7 @@ export function App() {
       } catch (e: any) { log('IndexedDB: ' + e.message); }
       setReady(true);
       loadGoogleScript().catch((e) => log(e.message));
+      addEventListener('online', () => { if (!googleReady()) loadGoogleScript().then(() => log('weer online: Google-login geladen'), () => {}); });
       if (hasValidToken()) { log('bestaand token gebruikt'); }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -217,12 +228,12 @@ export function App() {
   } else if (route.kind === 'note') {
     const n = byId.get(route.id);
     screen = n && n.isMd
-      ? <NoteView key={n.id} node={n} heading={route.heading} db={dbRef} index={index} byId={byId} go={go} goBack={goBack} />
+      ? <NoteView key={n.id} node={n} version={version} heading={route.heading} db={dbRef} index={index} byId={byId} go={go} goBack={goBack} />
       : <Missing go={go} what="Deze notitie" />;
   } else {
     const folder = route.id ? byId.get(route.id) : rootNode;
     screen = folder && folder.isFolder
-      ? <FolderView key={folder.id} folder={folder} isRoot={folder === rootNode} kids={children.get(folder.id) ?? []} byId={byId} mdCount={mdCount} db={dbRef} go={go} goBack={goBack} />
+      ? <FolderView key={folder.id} folder={folder} isRoot={folder === rootNode} kids={children.get(folder.id) ?? []} byId={byId} mdCount={mdCount} version={version} db={dbRef} go={go} goBack={goBack} />
       : <Missing go={go} what="Deze map" />;
   }
 
@@ -252,11 +263,11 @@ interface Attempt { at: number; ok: boolean; text: string }
 
 /** Shown above every screen after a failed or incomplete sync, with a way to try again. */
 function Notice({ notice, busy, retry, dismiss }: { notice: SyncNotice; busy: boolean; retry: () => void; dismiss: () => void }) {
-  const title = notice.kind === 'info' ? 'Bijwerken onvolledig.' : 'Bijwerken mislukt.';
+  const title = notice.kind === 'info' ? 'Bijwerken onvolledig.' : notice.kind === 'tap' ? 'Bijna klaar.' : 'Bijwerken mislukt.';
   return (
-    <div className={'notice ' + notice.kind} role={notice.kind === 'info' ? 'status' : 'alert'}>
+    <div className={'notice ' + notice.kind} role={notice.kind === 'info' || notice.kind === 'tap' ? 'status' : 'alert'}>
       <p><b>{title}</b> {notice.text}</p>
-      <button className="btn" onClick={retry} disabled={busy}>{busy ? 'Bezig…' : notice.kind === 'auth' ? 'Opnieuw inloggen' : 'Opnieuw proberen'}</button>
+      <button className="btn" onClick={retry} disabled={busy}>{busy ? 'Bezig…' : notice.kind === 'auth' || notice.kind === 'tap' ? 'Inloggen' : 'Opnieuw proberen'}</button>
       <button className="btn secondary" onClick={dismiss}>Sluiten</button>
     </div>
   );
@@ -294,11 +305,11 @@ function Crumbs({ node, byId, go }: { node: TreeNode; byId: Map<string, TreeNode
 /* ---------------- folder ---------------- */
 
 interface FolderProps {
-  folder: TreeNode; isRoot: boolean; kids: TreeNode[]; byId: Map<string, TreeNode>; mdCount: Map<string, number>;
+  folder: TreeNode; isRoot: boolean; kids: TreeNode[]; byId: Map<string, TreeNode>; mdCount: Map<string, number>; version: number;
   db: { current: IDBPDatabase | null }; go: (r: Route, replace?: boolean) => void; goBack: (fallback: Route) => void;
 }
 
-function FolderView({ folder, isRoot, kids, byId, mdCount, db, go, goBack }: FolderProps) {
+function FolderView({ folder, isRoot, kids, byId, mdCount, version, db, go, goBack }: FolderProps) {
   const { folders, notes, others } = useMemo(() => listFolder(kids), [kids]);
   const cards = isRoot || folders.length + notes.length <= CARD_LIMIT;
   const parentRoute: Route = { kind: 'folder', id: folder.parent && byId.get(folder.parent)?.parent ? folder.parent : null };
@@ -312,7 +323,7 @@ function FolderView({ folder, isRoot, kids, byId, mdCount, db, go, goBack }: Fol
       {cards ? (
         <div>
           {folders.map((f) => <FolderCard key={f.id} f={f} count={mdCount.get(f.id) ?? 0} open={open} />)}
-          {notes.map((n) => <NoteCard key={n.id} n={n} db={db} open={open} />)}
+          {notes.map((n) => <NoteCard key={n.id} n={n} version={version} db={db} open={open} />)}
         </div>
       ) : (
         <div className="list">
@@ -355,13 +366,13 @@ function FolderCard({ f, count, open }: { f: TreeNode; count: number; open: (n: 
   );
 }
 
-function NoteCard({ n, db, open }: { n: TreeNode; db: { current: IDBPDatabase | null }; open: (n: TreeNode) => void }) {
+function NoteCard({ n, version, db, open }: { n: TreeNode; version: number; db: { current: IDBPDatabase | null }; open: (n: TreeNode) => void }) {
   const [text, setText] = useState('');
   useEffect(() => {
     let alive = true;
-    if (db.current) loadContent(db.current, n.id).then((c) => { if (alive && c) setText(previewOf(c.text)); });
+    if (db.current) loadContent(db.current, n.id).then((c) => { if (alive) setText(c ? previewOf(c.text) : ''); });
     return () => { alive = false; };
-  }, [n.id, db]);
+  }, [n.id, version, db]);
   return (
     <a className="row" href={urlFor({ kind: 'note', id: n.id, heading: null })} onClick={(e) => { e.preventDefault(); open(n); }}>
       <Tile iso={n.modifiedTime} />
@@ -373,20 +384,24 @@ function NoteCard({ n, db, open }: { n: TreeNode; db: { current: IDBPDatabase | 
 /* ---------------- note ---------------- */
 
 interface NoteProps {
-  node: TreeNode; heading: string | null; db: { current: IDBPDatabase | null }; index: ReturnType<typeof buildLinkIndex>;
+  node: TreeNode; version: number; heading: string | null; db: { current: IDBPDatabase | null }; index: ReturnType<typeof buildLinkIndex>;
   byId: Map<string, TreeNode>; go: (r: Route, replace?: boolean) => void; goBack: (fallback: Route) => void;
 }
 
-function NoteView({ node, heading, db, index, byId, go, goBack }: NoteProps) {
-  const [text, setText] = useState<string | null | undefined>(undefined); // undefined = loading, null = not downloaded
+function NoteView({ node, version, heading, db, index, byId, go, goBack }: NoteProps) {
+  // undefined = loading, null = not downloaded. Re-read on every new data version, so an open note shows
+  // the synced text; the date shown is the date of that text, not of the newest tree entry (R2-1).
+  const [rec, setRec] = useState<ContentRecord | null | undefined>(undefined);
   useEffect(() => {
     let alive = true;
     (async () => {
       const c = db.current ? await loadContent(db.current, node.id) : undefined;
-      if (alive) setText(c ? c.text : null);
+      if (alive) setRec(c ?? null);
     })();
     return () => { alive = false; };
-  }, [node.id, db]);
+  }, [node.id, version, db]);
+  const text = rec === undefined ? undefined : rec === null ? null : rec.text;
+  const behind = !!rec && (node.md5Checksum ? rec.md5Checksum !== node.md5Checksum : rec.modifiedTime !== node.modifiedTime);
 
   const parsed = useMemo(() => {
     if (text == null) return null;
@@ -423,7 +438,8 @@ function NoteView({ node, heading, db, index, byId, go, goBack }: NoteProps) {
       <Crumbs node={node} byId={byId} go={go} />
       <article className="note" ref={articleRef} onClick={onClick}>
         {!parsed?.hasH1 && <h1>{noteTitle(node)}</h1>}
-        <p className="meta">Gewijzigd {fmtDate(node.modifiedTime)}</p>
+        <p className="meta">Gewijzigd {fmtDate(rec?.modifiedTime || node.modifiedTime)}</p>
+        {behind && <p className="sub">Er staat een nieuwere versie in Google Drive die nog niet is opgehaald. Tik op Bijwerken.</p>}
         {parsed?.front && (
           <details className="fm"><summary>Frontmatter</summary><pre>{parsed.front}</pre></details>
         )}

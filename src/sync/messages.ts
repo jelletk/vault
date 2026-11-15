@@ -2,7 +2,7 @@
 
 export interface SyncNotice {
   /** auth: token expired or refused (button logs in again); error: anything else; info: finished but incomplete. */
-  kind: 'auth' | 'error' | 'info';
+  kind: 'auth' | 'error' | 'info' | 'tap';
   text: string;
 }
 
@@ -14,6 +14,8 @@ export function describeSyncError(e: any): SyncNotice {
     case 'AuthError':
       return { kind: 'auth', text: 'Google-toegang is verlopen of geweigerd. Je notities blijven leesbaar.' };
     case 'NeedTapError':
+      return { kind: 'tap', text: msg };
+    case 'GisLoadError':
     case 'RootLostError':
       return { kind: 'error', text: msg };
     case 'SyncStalledError':
