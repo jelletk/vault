@@ -153,6 +153,7 @@ export function App() {
       const n = describeSyncError(e);
       if (n.kind === 'auth') dropToken();
       setNotice(n);
+      if (n.kind === 'tap') { log(n.text); return; } // not a failure: the popup just needs a fresh tap
       log('FOUT: ' + n.text + (e?.message && !n.text.includes(e.message) ? ` [${e.message}]` : ''));
       await saveAttempt({ at, ok: false, text: n.text });
     } finally { busyRef.current = false; setBusy(false); tick((x) => x + 1); }
