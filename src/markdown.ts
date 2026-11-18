@@ -28,6 +28,22 @@ const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
 md.use(taskLists, { enabled: false, label: false }); // checkboxes are shown, never changed (read-only app)
 const esc = md.utils.escapeHtml;
 
+// Task checkboxes get the task text as their accessible name (R2-13); they stay disabled (read-only).
+// Runs after the task-list plugin, which put the <input> as the first child of the item's inline token.
+md.core.ruler.after('github-task-lists', 'task-names', (state) => {
+  for (const tok of state.tokens) {
+    const first = tok.type === 'inline' ? tok.children?.[0] : undefined;
+    if (!first || first.type !== 'html_inline' || !first.content.startsWith('<input class="task-list-item-checkbox"')) continue;
+    const name = tok.children!.slice(1).map((c) => {
+      if (c.type === 'text' || c.type === 'code_inline') return c.content;
+      if (c.type === 'softbreak' || c.type === 'hardbreak') return ' ';
+      if (c.type === 'wikilink') { const [target, ...alias] = c.content.split('|'); return alias.length ? alias.join('|') : target.replace(/^.*\//, '').replace(/#.*/, '').replace(/\.md$/i, ''); }
+      return '';
+    }).join('').replace(/\s+/g, ' ').trim();
+    if (name) first.content = first.content.replace('<input ', `<input aria-label="${esc(name)}" `);
+  }
+});
+
 // --- [[wikilinks]] as an inline rule ---
 md.inline.ruler.before('link', 'wikilink', (state, silent) => {
   const s = state.src, p = state.pos;

@@ -80,3 +80,24 @@ describe('previewOf', () => {
   });
   it('slugifies like headings', () => { expect(slugify('Één kop, met: leestekens!')).toBe('een-kop-met-leestekens'); });
 });
+
+describe('task checkboxes (R2-13)', () => {
+  it('are named by their task text and stay read-only', () => {
+    const h = render('- [ ] Eerste taak\n- [x] Klaar met **vet** en `code`\n- [ ] Zie [[MEMORY]] en [[CLAUDE|de router]]');
+    const inputs = h.match(/<input[^>]*>/g)!;
+    expect(inputs).toHaveLength(3);
+    for (const i of inputs) expect(i).toContain('disabled');
+    expect(inputs[0]).toContain('aria-label="Eerste taak"');
+    expect(inputs[1]).toContain('aria-label="Klaar met vet en code"');
+    expect(inputs[1]).toContain('checked');
+    expect(inputs[2]).toContain('aria-label="Zie MEMORY en de router"');
+  });
+  it('escapes the name', () => {
+    const h = render('- [ ] zeg "hoi" <b>&');
+    expect(h).toMatch(/aria-label="zeg &quot;hoi&quot; &lt;b&gt;&amp;"/);
+    expect(h).not.toContain('<b>');
+  });
+  it('leaves a normal list alone', () => {
+    expect(render('- gewoon\n- lijstje')).not.toContain('<input');
+  });
+});

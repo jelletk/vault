@@ -59,3 +59,17 @@ export function splitPrefix(name: string): { prefix: string | null; label: strin
 }
 
 export const driveUrl = (id: string) => `https://drive.google.com/file/d/${encodeURIComponent(id)}/view`;
+
+/**
+ * Document title per screen (R2-13), e.g. "MEMORY – Vault". `node` is the item the route points at
+ * (the root folder for the start screen); undefined means it is not on this device.
+ */
+export function screenTitle(r: Route, node: TreeNode | undefined, hasData: boolean): string {
+  const t = (s: string) => `${s} – Vault`;
+  if (r.kind === 'sync') return t('Status');
+  if (!hasData) return 'Vault';
+  if (!node) return t('Niet gevonden');
+  if (r.kind === 'note') return node.isMd ? t(noteTitle(node)) : t('Niet gevonden');
+  if (!node.isFolder) return t('Niet gevonden');
+  return t(node.parent === null ? 'Life OS' : splitPrefix(node.name).label);
+}

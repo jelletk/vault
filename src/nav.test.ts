@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareFolders, listFolder, parseRoute, splitPrefix, urlFor } from './nav';
+import { compareFolders, listFolder, parseRoute, screenTitle, splitPrefix, urlFor } from './nav';
 import type { TreeNode } from './sync/types';
 
 const node = (name: string, over: Partial<TreeNode> = {}): TreeNode => ({
@@ -44,5 +44,20 @@ describe('ordering', () => {
   it('splits the numeric prefix', () => {
     expect(splitPrefix('01 Projects')).toEqual({ prefix: '01', label: 'Projects' });
     expect(splitPrefix('_Inbox')).toEqual({ prefix: null, label: '_Inbox' });
+  });
+});
+
+describe('page titles (R2-13)', () => {
+  const root = node('Life OS', { isFolder: true, isMd: false, parent: null });
+  it('names each screen', () => {
+    expect(screenTitle({ kind: 'folder', id: null }, root, true)).toBe('Life OS – Vault');
+    expect(screenTitle({ kind: 'folder', id: 'x' }, folder('02 Areas'), true)).toBe('Areas – Vault');
+    expect(screenTitle({ kind: 'note', id: 'x', heading: null }, node('MEMORY.md'), true)).toBe('MEMORY – Vault');
+    expect(screenTitle({ kind: 'sync' }, undefined, false)).toBe('Status – Vault');
+  });
+  it('says when something is missing, and stays plain before the first sync', () => {
+    expect(screenTitle({ kind: 'note', id: 'weg', heading: null }, undefined, true)).toBe('Niet gevonden – Vault');
+    expect(screenTitle({ kind: 'note', id: 'x', heading: null }, folder('Map'), true)).toBe('Niet gevonden – Vault');
+    expect(screenTitle({ kind: 'folder', id: null }, undefined, false)).toBe('Vault');
   });
 });

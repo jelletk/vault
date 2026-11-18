@@ -10,7 +10,7 @@ import { describeIncomplete, describeSyncError, type SyncNotice } from './sync/m
 import { buildLinkIndex } from './sync/links';
 import { summarize } from './sync/paths';
 import type { ContentRecord, SyncStats, TreeNode } from './sync/types';
-import { driveUrl, listFolder, noteTitle, parseRoute, splitPrefix, urlFor, type Route } from './nav';
+import { driveUrl, listFolder, noteTitle, parseRoute, screenTitle, splitPrefix, urlFor, type Route } from './nav';
 import { previewOf, renderMarkdown, splitFrontmatter } from './markdown';
 
 /** Resolves with the value, or with `fallback` after `ms`: for local steps that must never keep the app busy. */
@@ -56,6 +56,7 @@ export function App() {
   const stopRef = useRef<AbortController | null>(null);
   const session = useRef(0);
   const [notice, setNotice] = useState<SyncNotice | null>(null);
+  const [syncSay, setSyncSay] = useState(''); // polite live text for sync start/end (R2-13)
   const [lastAttempt, setLastAttempt] = useState<Attempt | null>(null);
   const [lines, setLines] = useState<string[]>([]);
   const [route, setRoute] = useState<Route>(() => parseRoute(location.pathname, location.hash));
@@ -82,16 +83,38 @@ export function App() {
   }, [nodes, byId]);
 
   /* --- navigation (History API, so the iOS edge swipe goes back) --- */
+  // Where keyboard/VoiceOver focus goes once the new screen is there (R2-12): the heading after opening
+  // something, the card or row you came from after going back. null = leave focus alone (startup).
+  const focusReq = useRef<{ itemId?: string } | null>(null);
   const go = useCallback((r: Route, replace = false) => {
     const depth = (history.state?.depth ?? 0) + (replace ? 0 : 1);
-    if (!replace) history.replaceState({ ...history.state, y: window.scrollY }, '');
+    // remember the item being opened, so going back can return focus to it
+    if (!replace) history.replaceState({ ...history.state, y: window.scrollY, from: 'id' in r ? r.id : null }, '');
     (replace ? history.replaceState : history.pushState).call(history, { depth }, '', urlFor(r));
     popped.current = false;
+    focusReq.current = {};
     setRoute(r);
   }, []);
 
+  /** Tries to apply a pending focus request; called after every render and when a note has rendered. */
+  const applyFocus = useCallback(() => {
+    const req = focusReq.current;
+    if (!req) return;
+    const el = (req.itemId && document.querySelector<HTMLElement>(`main [data-id="${CSS.escape(req.itemId)}"]`))
+      || document.querySelector<HTMLElement>('main h1');
+    if (!el) return; // screen not there yet (note still loading); NoteView calls again
+    if (el.tagName === 'H1') el.tabIndex = -1;
+    el.focus({ preventScroll: true });
+    focusReq.current = null;
+  }, []);
+  useEffect(() => { applyFocus(); });
+
   useEffect(() => {
-    const onPop = () => { popped.current = true; setRoute(parseRoute(location.pathname, location.hash)); };
+    const onPop = () => {
+      popped.current = true;
+      focusReq.current = { itemId: history.state?.from ?? undefined };
+      setRoute(parseRoute(location.pathname, location.hash));
+    };
     addEventListener('popstate', onPop);
     return () => removeEventListener('popstate', onPop);
   }, []);
@@ -133,6 +156,7 @@ export function App() {
     busyRef.current = true;
     setBusy(true);
     setNotice(null);
+    setSyncSay('Bijwerken gestart.');
     const at = Date.now();
     const mine = session.current;
     const stop = new AbortController();
@@ -169,10 +193,12 @@ export function App() {
         + `${stats.downloaded} gedownload, ${stats.skippedUnchanged} ongewijzigd, +${stats.added} ~${stats.modified} -${stats.removed}, ${stats.apiCalls} API-calls`
         + (stats.failedDownloads ? `, ${stats.failedDownloads} MISLUKT` : ''));
       if (stats.failedDownloads) setNotice(describeIncomplete(stats.failedDownloads));
+      else setSyncSay(`Bijwerken klaar: ${stats.downloaded ? stats.downloaded + ' notities opgehaald' : 'niets nieuws'}.`);
       await saveAttempt({ at, ok: true, text: stats.failedDownloads ? describeIncomplete(stats.failedDownloads).text : '' });
       await within(reload(), LOCAL_MS, undefined);
     } catch (e: any) {
-      if (e?.name === 'SyncStoppedError' || session.current !== mine) { log('sync gestopt'); return; }
+      if (e?.name === 'SyncStoppedError' || session.current !== mine) { log('sync gestopt'); setSyncSay('Bijwerken gestopt.'); return; }
+      setSyncSay(''); // the notice card itself is the live message
       const n = describeSyncError(e);
       if (n.kind === 'auth') dropToken();
       setNotice(n);
@@ -243,6 +269,16 @@ export function App() {
   }, []);
   useEffect(() => { setBarHidden(false); }, [route]);
 
+  // The bar may wrap to more rows at large text sizes (R2-14); the page padding follows its real height.
+  const barRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = barRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => document.documentElement.style.setProperty('--bar-real', el.offsetHeight + 'px'));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   /* --- rendering --- */
   const hasData = nodes.length > 0;
   const expired = !hasValidToken();
@@ -263,7 +299,7 @@ export function App() {
   } else if (route.kind === 'note') {
     const n = byId.get(route.id);
     screen = n && n.isMd
-      ? <NoteView key={n.id} node={n} version={version} heading={route.heading} db={dbRef} index={index} byId={byId} go={go} goBack={goBack} />
+      ? <NoteView key={n.id} node={n} version={version} heading={route.heading} db={dbRef} index={index} byId={byId} go={go} goBack={goBack} onRendered={applyFocus} />
       : <Missing go={go} what="Deze notitie" />;
   } else {
     const folder = route.id ? byId.get(route.id) : rootNode;
@@ -276,10 +312,21 @@ export function App() {
   const showBack = ready && (route.kind === 'sync' || (!!shownNode && shownNode !== rootNode));
   const backTo: Route = shownNode?.parent && byId.get(shownNode.parent)?.parent ? { kind: 'folder', id: shownNode.parent } : rootRoute;
 
+  // Page title per screen, and a polite announcement after a route change (R2-12/13).
+  const title = !ready ? 'Vault' : screenTitle(route, route.kind === 'sync' ? undefined : route.id ? byId.get(route.id) : rootNode ?? undefined, hasData);
+  const [routeSay, setRouteSay] = useState('');
+  const firstTitle = useRef(true);
+  useEffect(() => {
+    document.title = title;
+    if (firstTitle.current) { firstTitle.current = false; return; }
+    setRouteSay(title.replace(/ – Vault$/, '') + ' geopend');
+  }, [title]);
+
   return (
     <div className="app">
-      <header className={'topbar' + (barHidden ? ' hidden' : '')}>
-        <div className="in">
+      {/* Focus inside the hidden bar brings it back (keyboard, VoiceOver); touch scrolling is unchanged (R2-12). */}
+      <header className={'topbar' + (barHidden ? ' hidden' : '')} onFocus={() => setBarHidden(false)}>
+        <div className="in" ref={barRef}>
         {showBack
           ? <BackButton onClick={() => goBack(backTo)} />
           : <button className="chip" onClick={() => go(rootRoute)} aria-label="Naar het begin">Vault</button>}
@@ -288,8 +335,12 @@ export function App() {
         <button className="chip" onClick={() => go({ kind: 'sync' })} aria-label="Sync-status en log">Status</button>
         </div>
       </header>
-      {notice && ready && <Notice notice={notice} busy={busy} retry={update} dismiss={() => setNotice(null)} />}
-      {screen}
+      <main id="main">
+        {notice && ready && <Notice notice={notice} busy={busy} retry={update} dismiss={() => setNotice(null)} />}
+        {screen}
+      </main>
+      <div className="sr" aria-live="polite" aria-atomic="true">{routeSay}</div>
+      <div className="sr" role="status" aria-atomic="true">{syncSay}</div>
     </div>
   );
 }
@@ -328,7 +379,7 @@ function Crumbs({ node, byId, go }: { node: TreeNode; byId: Map<string, TreeNode
     <nav className="path" aria-label="Pad">
       {chain.map((c, i) => (
         <span key={c.id}>
-          {i > 0 && ' / '}
+          {i > 0 && <span className="sep" aria-hidden="true">/</span>}
           <a href={urlFor({ kind: 'folder', id: c.parent ? c.id : null })}
             onClick={(e) => { e.preventDefault(); go({ kind: 'folder', id: c.parent ? c.id : null }); }}>{c.parent ? c.name : 'Life OS'}</a>
         </span>
@@ -363,12 +414,12 @@ function FolderView({ folder, isRoot, kids, byId, mdCount, version, db, go, goBa
       ) : (
         <div className="list">
           {folders.map((f) => (
-            <a key={f.id} className="crow" href={urlFor({ kind: 'folder', id: f.id })} onClick={(e) => { e.preventDefault(); open(f); }}>
+            <a key={f.id} data-id={f.id} className="crow" href={urlFor({ kind: 'folder', id: f.id })} onClick={(e) => { e.preventDefault(); open(f); }}>
               <span className="ct"><FolderIcon /> {f.name}</span><span className="cm">{mdCount.get(f.id) ?? 0}</span>
             </a>
           ))}
           {notes.map((n) => (
-            <a key={n.id} className="crow" href={urlFor({ kind: 'note', id: n.id, heading: null })} onClick={(e) => { e.preventDefault(); open(n); }}>
+            <a key={n.id} data-id={n.id} className="crow" href={urlFor({ kind: 'note', id: n.id, heading: null })} onClick={(e) => { e.preventDefault(); open(n); }}>
               <span className="ct">{noteTitle(n)}</span><span className="cm">{fmtDate(n.modifiedTime)}</span>
             </a>
           ))}
@@ -394,7 +445,7 @@ function FolderView({ folder, isRoot, kids, byId, mdCount, version, db, go, goBa
 function FolderCard({ f, count, open }: { f: TreeNode; count: number; open: (n: TreeNode) => void }) {
   const { prefix, label } = splitPrefix(f.name);
   return (
-    <a className="row" href={urlFor({ kind: 'folder', id: f.id })} onClick={(e) => { e.preventDefault(); open(f); }}>
+    <a className="row" data-id={f.id} href={urlFor({ kind: 'folder', id: f.id })} onClick={(e) => { e.preventDefault(); open(f); }}>
       <Tile prefix={prefix ?? '·'} />
       <div><div className="rt">{label}</div><div className="rm">{count} {count === 1 ? 'notitie' : 'notities'}</div></div>
     </a>
@@ -409,7 +460,7 @@ function NoteCard({ n, version, db, open }: { n: TreeNode; version: number; db: 
     return () => { alive = false; };
   }, [n.id, version, db]);
   return (
-    <a className="row" href={urlFor({ kind: 'note', id: n.id, heading: null })} onClick={(e) => { e.preventDefault(); open(n); }}>
+    <a className="row" data-id={n.id} href={urlFor({ kind: 'note', id: n.id, heading: null })} onClick={(e) => { e.preventDefault(); open(n); }}>
       <Tile iso={n.modifiedTime} />
       <div><div className="rt">{noteTitle(n)}</div><div className="rm">{fmtDate(n.modifiedTime)}</div>{text && <div className="rx">{text}</div>}</div>
     </a>
@@ -420,10 +471,13 @@ function NoteCard({ n, version, db, open }: { n: TreeNode; version: number; db: 
 
 interface NoteProps {
   node: TreeNode; version: number; heading: string | null; db: { current: IDBPDatabase | null }; index: ReturnType<typeof buildLinkIndex>;
-  byId: Map<string, TreeNode>; go: (r: Route, replace?: boolean) => void; goBack: (fallback: Route) => void;
+  byId: Map<string, TreeNode>; go: (r: Route, replace?: boolean) => void; goBack: (fallback: Route) => void; onRendered: () => void;
 }
 
-function NoteView({ node, version, heading, db, index, byId, go, goBack }: NoteProps) {
+/** 'smooth' unless the system asks for reduced motion, like the CSS does (R2-15). */
+const scrollBehavior = (): ScrollBehavior => (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth');
+
+function NoteView({ node, version, heading, db, index, byId, go, goBack, onRendered }: NoteProps) {
   // undefined = loading, null = not downloaded. Re-read on every new data version, so an open note shows
   // the synced text; the date shown is the date of that text, not of the newest tree entry (R2-1).
   const [rec, setRec] = useState<ContentRecord | null | undefined>(undefined);
@@ -447,10 +501,13 @@ function NoteView({ node, version, heading, db, index, byId, go, goBack }: NoteP
 
   const articleRef = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
+    if (rec === undefined) return;
+    onRendered(); // the heading exists now, so a pending focus can land (R2-12)
     if (!parsed) return;
     if (heading) document.getElementById(heading)?.scrollIntoView();
     else if (history.state?.y !== undefined && window.scrollY === 0) window.scrollTo(0, history.state.y);
-  }, [parsed, heading]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parsed, heading, rec === undefined]);
 
   const parent = node.parent ? byId.get(node.parent) : undefined;
   const parentRoute: Route = { kind: 'folder', id: parent && parent.parent ? parent.id : null };
@@ -460,7 +517,7 @@ function NoteView({ node, version, heading, db, index, byId, go, goBack }: NoteP
     if (!a) return;
     if (a.classList.contains('broken')) { e.preventDefault(); return; }
     const anchor = a.getAttribute('data-anchor');
-    if (anchor !== null) { e.preventDefault(); document.getElementById(anchor)?.scrollIntoView({ behavior: 'smooth' }); return; }
+    if (anchor !== null) { e.preventDefault(); document.getElementById(anchor)?.scrollIntoView({ behavior: scrollBehavior() }); return; }
     if (a.hasAttribute('data-nav')) {
       e.preventDefault();
       const u = new URL(a.getAttribute('href')!, location.origin);
@@ -472,11 +529,12 @@ function NoteView({ node, version, heading, db, index, byId, go, goBack }: NoteP
     <section className="A">
       <Crumbs node={node} byId={byId} go={go} />
       <article className="note" ref={articleRef} onClick={onClick}>
-        {!parsed?.hasH1 && <h1>{noteTitle(node)}</h1>}
+        {/* own title only once we know the note has no H1 of its own, so focus never lands on a heading that disappears */}
+        {(parsed ? !parsed.hasH1 : text === null) && <h1>{noteTitle(node)}</h1>}
         <p className="meta">Gewijzigd {fmtDate(rec?.modifiedTime || node.modifiedTime)}</p>
         {behind && <p className="sub">Er staat een nieuwere versie in Google Drive die nog niet is opgehaald. Tik op Bijwerken.</p>}
         {parsed?.front && (
-          <details className="fm"><summary>Frontmatter</summary><pre>{parsed.front}</pre></details>
+          <details className="fm"><summary><span>Frontmatter</span></summary><pre>{parsed.front}</pre></details>
         )}
         {text === undefined && <p className="sub">Laden…</p>}
         {text === null && <p className="sub">Deze notitie is nog niet gedownload. Tik op Bijwerken (internet en een token nodig).</p>}
